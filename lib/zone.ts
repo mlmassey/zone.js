@@ -863,10 +863,13 @@ const Zone: ZoneType = (function(global: any) {
       const counts = this._taskCounts;
       const prev = counts[type];
       const next = counts[type] = prev + count;
+      // Remove throwing an exception as it is not handled properly in zone code
+      /*
       if (next < 0) {
         throw new Error('More tasks executed then were scheduled.');
       }
-      if (prev == 0 || next == 0) {
+      */
+      if (prev == 0 || next <= 0) {
         const isEmpty: HasTaskState = {
           microTask: counts.microTask > 0,
           macroTask: counts.macroTask > 0,
