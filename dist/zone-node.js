@@ -293,10 +293,13 @@ var Zone$1 = (function (global) {
             var counts = this._taskCounts;
             var prev = counts[type];
             var next = counts[type] = prev + count;
+            // Remove throwing an exception as it is not handled properly in zone code
+            /*
             if (next < 0) {
-                throw new Error('More tasks executed then were scheduled.');
+              throw new Error('More tasks executed then were scheduled.');
             }
-            if (prev == 0 || next == 0) {
+            */
+            if (prev == 0 || next <= 0) {
                 var isEmpty = {
                     microTask: counts.microTask > 0,
                     macroTask: counts.macroTask > 0,
@@ -651,7 +654,7 @@ var Zone$1 = (function (global) {
         /// Skip this frame when printing out stack
         FrameType[FrameType["blackList"] = 0] = "blackList";
         /// This frame marks zone transition
-        FrameType[FrameType["trasition"] = 1] = "trasition";
+        FrameType[FrameType["transition"] = 1] = "transition";
     })(FrameType || (FrameType = {}));
     
     var NativeError = global[__symbol__('Error')] = global.Error;
@@ -689,7 +692,7 @@ var Zone$1 = (function (global) {
                         frames_1.splice(i, 1);
                         i--;
                     }
-                    else if (frameType === FrameType.trasition) {
+                    else if (frameType === FrameType.transition) {
                         if (zoneFrame.parent) {
                             // This is the special frame where zone changed. Print and process it accordingly
                             frames_1[i] += " [" + zoneFrame.parent.zone.name + " => " + zoneFrame.zone.name + "]";
@@ -722,6 +725,18 @@ var Zone$1 = (function (global) {
             set: function (value) { return NativeError.stackTraceLimit = value; }
         });
     }
+    if (NativeError.hasOwnProperty('captureStackTrace')) {
+        Object.defineProperty(ZoneAwareError, 'captureStackTrace', {
+            value: function (targetObject, constructorOpt) {
+                NativeError.captureStackTrace(targetObject, constructorOpt);
+            }
+        });
+    }
+    Object.defineProperty(ZoneAwareError, 'prepareStackTrace', {
+        get: function () { return NativeError.prepareStackTrace; },
+        set: function (value) { return NativeError.prepareStackTrace = value; }
+    });
+    // Now we need to populet the `blacklistedStackFrames` as well as find the
     // Now we need to populet the `blacklistedStackFrames` as well as find the
     // run/runGuraded/runTask frames. This is done by creating a detect zone and then threading
     // the execution through all of the above methods so that we can look at the stack trace and
@@ -748,7 +763,7 @@ var Zone$1 = (function (global) {
                         // FireFox: Zone.prototype.run@http://localhost:9876/base/build/lib/zone.js:101:24
                         // Safari: run@http://localhost:9876/base/build/lib/zone.js:101:24
                         var fnName = frame.split('(')[0].split('@')[0];
-                        var frameType = FrameType.trasition;
+                        var frameType = FrameType.transition;
                         if (fnName.indexOf('ZoneAwareError') !== -1) {
                             zoneAwareFrame = frame;
                         }
@@ -813,43 +828,7 @@ function bindArguments(args, source) {
 
 var isNode = (typeof process !== 'undefined' && {}.toString.call(process) === '[object process]');
 
-function patchProperty(obj, prop) {
-    var desc = Object.getOwnPropertyDescriptor(obj, prop) || { enumerable: true, configurable: true };
-    // A property descriptor cannot have getter/setter and be writable
-    // deleting the writable and value properties avoids this error:
-    //
-    // TypeError: property descriptors must not specify a value or be writable when a
-    // getter or setter has been specified
-    delete desc.writable;
-    delete desc.value;
-    // substr(2) cuz 'onclick' -> 'click', etc
-    var eventName = prop.substr(2);
-    var _prop = '_' + prop;
-    desc.set = function (fn) {
-        if (this[_prop]) {
-            this.removeEventListener(eventName, this[_prop]);
-        }
-        if (typeof fn === 'function') {
-            var wrapFn = function (event) {
-                var result;
-                result = fn.apply(this, arguments);
-                if (result != undefined && !result)
-                    event.preventDefault();
-            };
-            this[_prop] = wrapFn;
-            this.addEventListener(eventName, wrapFn, false);
-        }
-        else {
-            this[_prop] = null;
-        }
-    };
-    // The getter would return undefined for unassigned properties but the default value of an
-    // unassigned property is null
-    desc.get = function () {
-        return this[_prop] || null;
-    };
-    Object.defineProperty(obj, prop, desc);
-}
+
 
 
 
@@ -997,17 +976,24 @@ function makeZoneAwareRemoveAllListeners(fnName, useCapturingParam) {
     var symbol = zoneSymbol(fnName);
     var defaultUseCapturing = useCapturingParam ? false : undefined;
     return function zoneAwareRemoveAllListener(self, args) {
+        var target = self || _global$1;
+        if (args.length === 0) {
+            // remove all listeners without eventName
+            target[EVENT_TASKS] = [];
+            // we don't cancel Task either, because call native eventEmitter.removeAllListeners will
+            // will do remove listener(cancelTask) for us
+            target[symbol]();
+            return;
+        }
         var eventName = args[0];
         var useCapturing = args[1] || defaultUseCapturing;
-        var target = self || _global$1;
-        var eventTasks = findAllExistingRegisteredTasks(target, eventName, useCapturing, true);
-        if (eventTasks) {
-            for (var i = 0; i < eventTasks.length; i++) {
-                var eventTask = eventTasks[i];
-                eventTask.zone.cancelTask(eventTask);
-            }
-        }
-        target[symbol](eventName, useCapturing);
+        // call this function just remove the related eventTask from target[EVENT_TASKS]
+        findAllExistingRegisteredTasks(target, eventName, useCapturing, true);
+        // we don't need useCapturing here because useCapturing is just for DOM, and
+        // removeAllListeners should only be called by node eventEmitter
+        // and we don't cancel Task either, because call native eventEmitter.removeAllListeners will
+        // will do remove listener(cancelTask) for us
+        target[symbol](eventName);
     };
 }
 function makeZoneAwareListeners(fnName) {
@@ -1231,6 +1217,7 @@ if (shouldPatchGlobalTimers) {
     patchTimer(_global, set, clear, 'Interval');
     patchTimer(_global, set, clear, 'Immediate');
 }
+patchNextTick();
 // Crypto
 var crypto;
 try {
@@ -1287,6 +1274,29 @@ if (httpClient && httpClient.ClientRequest) {
             return new ClientRequest_1(options, zone.wrap(callback, 'http.ClientRequest'));
         }
     };
+}
+function patchNextTick() {
+    var setNative = null;
+    function scheduleTask(task) {
+        var args = task.data;
+        args[0] = function () {
+            task.invoke.apply(this, arguments);
+        };
+        setNative.apply(process, args);
+        return task;
+    }
+    setNative =
+        patchMethod(process, 'nextTick', function (delegate) { return function (self, args) {
+            if (typeof args[0] === 'function') {
+                var zone = Zone.current;
+                var task = zone.scheduleMicroTask('nextTick', args[0], args, scheduleTask);
+                return task;
+            }
+            else {
+                // cause an error by calling it directly.
+                return delegate.apply(process, args);
+            }
+        }; });
 }
 
 })));
